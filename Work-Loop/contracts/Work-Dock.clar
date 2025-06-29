@@ -154,64 +154,92 @@
     )
 )
 
+;; Comprehensive input validation function for all user inputs
+(define-private (validate-all-inputs (project-name-opt (optional (string-ascii 50)))
+                                   (description-opt (optional (string-ascii 500)))
+                                   (budget-opt (optional uint))
+                                   (project-id-opt (optional uint))
+                                   (task-id-opt (optional uint))
+                                   (status-opt (optional (string-ascii 20)))
+                                   (member-opt (optional principal))
+                                   (rating-opt (optional uint)))
+    (let ((project-name-valid (match project-name-opt
+                                some-name (> (len some-name) u0)
+                                true))
+          (description-valid (match description-opt
+                               some-desc (> (len some-desc) u0)
+                               true))
+          (budget-valid (match budget-opt
+                          some-budget (> some-budget u0)
+                          true))
+          (project-id-valid (match project-id-opt
+                              some-id (>= some-id u0)
+                              true))
+          (task-id-valid (match task-id-opt
+                           some-id (>= some-id u0)
+                           true))
+          (status-valid (match status-opt
+                          some-status (> (len some-status) u0)
+                          true))
+          (rating-valid (match rating-opt
+                          some-rating (and (>= some-rating u1) (<= some-rating u5))
+                          true)))
+        (and project-name-valid description-valid budget-valid 
+             project-id-valid task-id-valid status-valid rating-valid)))
+
 ;; PUBLIC INTERFACE FUNCTIONS
 
 ;; Create a new collaborative project with specified parameters
 (define-public (create-new-collaborative-project (project-name (string-ascii 50)) 
                                                 (detailed-description (string-ascii 500)) 
                                                 (initial-budget uint))
-    (let
-        (
-            (new-project-id (generate-new-project-id))
-            (project-creator-address tx-sender)
+    (let ((new-project-id (generate-new-project-id))
+          (project-creator-address tx-sender))
+        (asserts! (validate-all-inputs (some project-name) (some detailed-description) 
+                                     (some initial-budget) none none none none none) 
+                 err-invalid-parameter-provided)
+        (asserts! (validate-project-creation-parameters project-name detailed-description initial-budget)
+                 err-invalid-parameter-provided)
+        (map-set collaborative-projects
+            { project-id: new-project-id }
+            {
+                project-owner-address: project-creator-address,
+                project-name: project-name,
+                detailed-project-description: detailed-description,
+                allocated-project-budget: initial-budget,
+                current-project-status: "active",
+                project-created-at-block: block-height,
+                registered-team-members: (list)
+            }
         )
-        (if (validate-project-creation-parameters project-name detailed-description initial-budget)
-            (begin
-                (map-set collaborative-projects
-                    { project-id: new-project-id }
-                    {
-                        project-owner-address: project-creator-address,
-                        project-name: project-name,
-                        detailed-project-description: detailed-description,
-                        allocated-project-budget: initial-budget,
-                        current-project-status: "active",
-                        project-created-at-block: block-height,
-                        registered-team-members: (list)
-                    }
-                )
-                (ok new-project-id)
-            )
-            err-invalid-parameter-provided
-        )
+        (ok new-project-id)
     )
 )
 
 ;; Add a new team member to an existing project
 (define-public (add-team-member-to-project (target-project-id uint) (new-member-wallet-address principal))
-    (let
-        (
-            (requesting-user-address tx-sender)
-        )
+    (let ((requesting-user-address tx-sender))
+        (asserts! (validate-all-inputs none none none (some target-project-id) 
+                                     none none (some new-member-wallet-address) none)
+                 err-invalid-parameter-provided)
         (match (map-get? collaborative-projects { project-id: target-project-id })
             existing-project-data
-                (if (is-eq (get project-owner-address existing-project-data) requesting-user-address)
-                    (if (is-some (index-of (get registered-team-members existing-project-data) new-member-wallet-address))
-                        err-team-member-already-exists
-                        (begin
-                            (map-set collaborative-projects
-                                { project-id: target-project-id }
-                                (merge existing-project-data { 
-                                    registered-team-members: (unwrap! (as-max-len? 
-                                                                      (append (get registered-team-members existing-project-data) 
-                                                                             new-member-wallet-address) 
-                                                                      u20) 
-                                                                     err-maximum-team-size-exceeded) 
-                                })
-                            )
-                            (ok true)
-                        )
+                (begin
+                    (asserts! (is-eq (get project-owner-address existing-project-data) requesting-user-address)
+                             err-unauthorized-access)
+                    (asserts! (is-none (index-of (get registered-team-members existing-project-data) new-member-wallet-address))
+                             err-team-member-already-exists)
+                    (map-set collaborative-projects
+                        { project-id: target-project-id }
+                        (merge existing-project-data { 
+                            registered-team-members: (unwrap! (as-max-len? 
+                                                              (append (get registered-team-members existing-project-data) 
+                                                                     new-member-wallet-address) 
+                                                              u20) 
+                                                             err-maximum-team-size-exceeded) 
+                        })
                     )
-                    err-unauthorized-access
+                    (ok true)
                 )
             err-project-does-not-exist
         )
@@ -227,41 +255,43 @@
     (task-completion-deadline uint)
     (task-payment-amount uint)
 )
-    (let
-        (
-            (requesting-user-address tx-sender)
-        )
+    (let ((requesting-user-address tx-sender))
+        (asserts! (validate-all-inputs (some task-name) (some comprehensive-task-description) 
+                                     (some task-payment-amount) (some target-project-id) 
+                                     none none (some designated-assignee-address) none)
+                 err-invalid-parameter-provided)
+        (asserts! (> task-completion-deadline block-height) err-invalid-parameter-provided)
         (match (map-get? collaborative-projects { project-id: target-project-id })
             existing-project-data
-                (if (is-eq (get project-owner-address existing-project-data) requesting-user-address)
-                    (if (validate-task-creation-parameters existing-project-data 
-                                                         task-name 
-                                                         comprehensive-task-description 
-                                                         designated-assignee-address 
-                                                         task-completion-deadline 
-                                                         task-payment-amount)
-                        (match (generate-new-task-id target-project-id)
-                            generated-task-id
-                                (begin
-                                    (map-set project-task-assignments
-                                        { parent-project-id: target-project-id, assigned-task-id: generated-task-id }
-                                        {
-                                            responsible-team-member: designated-assignee-address,
-                                            task-title-description: task-name,
-                                            comprehensive-task-details: comprehensive-task-description,
-                                            task-completion-deadline: task-completion-deadline,
-                                            task-compensation-amount: task-payment-amount,
-                                            current-task-status: "pending",
-                                            task-created-at-block: block-height
-                                        }
-                                    )
-                                    (ok generated-task-id)
+                (begin
+                    (asserts! (is-eq (get project-owner-address existing-project-data) requesting-user-address)
+                             err-unauthorized-access)
+                    (asserts! (validate-task-creation-parameters existing-project-data 
+                                                               task-name 
+                                                               comprehensive-task-description 
+                                                               designated-assignee-address 
+                                                               task-completion-deadline 
+                                                               task-payment-amount)
+                             err-invalid-parameter-provided)
+                    (match (generate-new-task-id target-project-id)
+                        generated-task-id
+                            (begin
+                                (map-set project-task-assignments
+                                    { parent-project-id: target-project-id, assigned-task-id: generated-task-id }
+                                    {
+                                        responsible-team-member: designated-assignee-address,
+                                        task-title-description: task-name,
+                                        comprehensive-task-details: comprehensive-task-description,
+                                        task-completion-deadline: task-completion-deadline,
+                                        task-compensation-amount: task-payment-amount,
+                                        current-task-status: "pending",
+                                        task-created-at-block: block-height
+                                    }
                                 )
-                            error-response err-project-does-not-exist
-                        )
-                        err-invalid-parameter-provided
+                                (ok generated-task-id)
+                            )
+                        error-response err-project-does-not-exist
                     )
-                    err-unauthorized-access
                 )
             err-project-does-not-exist
         )
@@ -272,27 +302,23 @@
 (define-public (modify-task-status (target-project-id uint) 
                                   (target-task-id uint) 
                                   (updated-status-value (string-ascii 20)))
-    (let
-        (
-            (requesting-user-address tx-sender)
-        )
+    (let ((requesting-user-address tx-sender))
+        (asserts! (validate-all-inputs none none none (some target-project-id) 
+                                     (some target-task-id) (some updated-status-value) none none)
+                 err-invalid-parameter-provided)
         (match (map-get? collaborative-projects { project-id: target-project-id })
             existing-project-data
                 (match (map-get? project-task-assignments { parent-project-id: target-project-id, assigned-task-id: target-task-id })
                     existing-task-data
-                        (if (or (is-eq (get project-owner-address existing-project-data) requesting-user-address) 
-                               (is-eq (get responsible-team-member existing-task-data) requesting-user-address))
-                            (if (> (len updated-status-value) u0)
-                                (begin
-                                    (map-set project-task-assignments
-                                        { parent-project-id: target-project-id, assigned-task-id: target-task-id }
-                                        (merge existing-task-data { current-task-status: updated-status-value })
-                                    )
-                                    (ok true)
-                                )
-                                err-invalid-parameter-provided
+                        (begin
+                            (asserts! (or (is-eq (get project-owner-address existing-project-data) requesting-user-address) 
+                                         (is-eq (get responsible-team-member existing-task-data) requesting-user-address))
+                                     err-unauthorized-access)
+                            (map-set project-task-assignments
+                                { parent-project-id: target-project-id, assigned-task-id: target-task-id }
+                                (merge existing-task-data { current-task-status: updated-status-value })
                             )
-                            err-unauthorized-access
+                            (ok true)
                         )
                     err-task-does-not-exist
                 )
@@ -303,47 +329,45 @@
 
 ;; Complete a task and process payment automatically
 (define-public (finalize-task-completion (target-project-id uint) (target-task-id uint))
-    (let
-        (
-            (requesting-user-address tx-sender)
-        )
+    (let ((requesting-user-address tx-sender))
+        (asserts! (validate-all-inputs none none none (some target-project-id) 
+                                     (some target-task-id) none none none)
+                 err-invalid-parameter-provided)
         (match (map-get? collaborative-projects { project-id: target-project-id })
             existing-project-data
                 (match (map-get? project-task-assignments { parent-project-id: target-project-id, assigned-task-id: target-task-id })
                     existing-task-data
-                        (if (and
-                                (is-eq (get responsible-team-member existing-task-data) requesting-user-address)
-                                (is-eq (get current-task-status existing-task-data) "pending")
+                        (begin
+                            (asserts! (is-eq (get responsible-team-member existing-task-data) requesting-user-address)
+                                     err-unauthorized-access)
+                            (asserts! (is-eq (get current-task-status existing-task-data) "pending")
+                                     err-invalid-status-transition)
+                            ;; Process payment transfer from project owner to task assignee
+                            (try! (stx-transfer? (get task-compensation-amount existing-task-data) 
+                                               (get project-owner-address existing-project-data) 
+                                               requesting-user-address))
+                            ;; Update task status to completed
+                            (map-set project-task-assignments
+                                { parent-project-id: target-project-id, assigned-task-id: target-task-id }
+                                (merge existing-task-data { current-task-status: "completed" })
                             )
-                            (begin
-                                ;; Process payment transfer from project owner to task assignee
-                                (try! (stx-transfer? (get task-compensation-amount existing-task-data) 
-                                                   (get project-owner-address existing-project-data) 
-                                                   requesting-user-address))
-                                ;; Update task status to completed
-                                (map-set project-task-assignments
-                                    { parent-project-id: target-project-id, assigned-task-id: target-task-id }
-                                    (merge existing-task-data { current-task-status: "completed" })
+                            ;; Update team member performance metrics
+                            (let ((current-member-metrics (default-to
+                                    { total-completed-tasks: u0, cumulative-earnings-amount: u0, average-performance-score: u0, total-received-ratings: u0 }
+                                    (map-get? team-member-performance-data { member-wallet-address: requesting-user-address })
+                                )))
+                                (map-set team-member-performance-data
+                                    { member-wallet-address: requesting-user-address }
+                                    {
+                                        total-completed-tasks: (+ (get total-completed-tasks current-member-metrics) u1),
+                                        cumulative-earnings-amount: (+ (get cumulative-earnings-amount current-member-metrics) 
+                                                                      (get task-compensation-amount existing-task-data)),
+                                        average-performance-score: (get average-performance-score current-member-metrics),
+                                        total-received-ratings: (get total-received-ratings current-member-metrics)
+                                    }
                                 )
-                                ;; Update team member performance metrics
-                                (let ((current-member-metrics (default-to
-                                        { total-completed-tasks: u0, cumulative-earnings-amount: u0, average-performance-score: u0, total-received-ratings: u0 }
-                                        (map-get? team-member-performance-data { member-wallet-address: requesting-user-address })
-                                    )))
-                                    (map-set team-member-performance-data
-                                        { member-wallet-address: requesting-user-address }
-                                        {
-                                            total-completed-tasks: (+ (get total-completed-tasks current-member-metrics) u1),
-                                            cumulative-earnings-amount: (+ (get cumulative-earnings-amount current-member-metrics) 
-                                                                          (get task-compensation-amount existing-task-data)),
-                                            average-performance-score: (get average-performance-score current-member-metrics),
-                                            total-received-ratings: (get total-received-ratings current-member-metrics)
-                                        }
-                                    )
-                                )
-                                (ok true)
                             )
-                            err-unauthorized-access
+                            (ok true)
                         )
                     err-task-does-not-exist
                 )
@@ -354,17 +378,14 @@
 
 ;; Submit performance rating for a team member
 (define-public (submit-team-member-rating (target-member-address principal) (performance-rating-score uint))
-    (if (and 
-            (>= performance-rating-score u1) 
-            (<= performance-rating-score u5)
-        )
-        (let
-            (
-                (current-member-metrics (default-to
-                    { total-completed-tasks: u0, cumulative-earnings-amount: u0, average-performance-score: u0, total-received-ratings: u0 }
-                    (map-get? team-member-performance-data { member-wallet-address: target-member-address })
-                ))
-            )
+    (begin
+        (asserts! (validate-all-inputs none none none none none none 
+                                     (some target-member-address) (some performance-rating-score))
+                 err-invalid-parameter-provided)
+        (let ((current-member-metrics (default-to
+                { total-completed-tasks: u0, cumulative-earnings-amount: u0, average-performance-score: u0, total-received-ratings: u0 }
+                (map-get? team-member-performance-data { member-wallet-address: target-member-address })
+            )))
             (map-set team-member-performance-data
                 { member-wallet-address: target-member-address }
                 {
@@ -379,7 +400,6 @@
             )
             (ok true)
         )
-        err-invalid-parameter-provided
     )
 )
 
@@ -387,12 +407,22 @@
 
 ;; Retrieve complete project information
 (define-read-only (fetch-project-information (target-project-id uint))
-    (map-get? collaborative-projects { project-id: target-project-id })
+    (begin
+        (asserts! (validate-all-inputs none none none (some target-project-id) 
+                                     none none none none) 
+                 none)
+        (map-get? collaborative-projects { project-id: target-project-id })
+    )
 )
 
 ;; Retrieve specific task details
 (define-read-only (fetch-task-information (target-project-id uint) (target-task-id uint))
-    (map-get? project-task-assignments { parent-project-id: target-project-id, assigned-task-id: target-task-id })
+    (begin
+        (asserts! (validate-all-inputs none none none (some target-project-id) 
+                                     (some target-task-id) none none none)
+                 none)
+        (map-get? project-task-assignments { parent-project-id: target-project-id, assigned-task-id: target-task-id })
+    )
 )
 
 ;; Get team member performance analytics
@@ -402,5 +432,10 @@
 
 ;; Verify if an address has access to a specific project
 (define-read-only (check-project-access-permissions (target-project-id uint) (requesting-member-address principal))
-    (validate-team-membership-access target-project-id requesting-member-address)
+    (begin
+        (asserts! (validate-all-inputs none none none (some target-project-id) 
+                                     none none (some requesting-member-address) none)
+                 false)
+        (validate-team-membership-access target-project-id requesting-member-address)
+    )
 )
